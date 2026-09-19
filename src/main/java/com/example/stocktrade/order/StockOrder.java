@@ -39,8 +39,11 @@ public class StockOrder {
     private BigDecimal limitPrice;
 
     @Enumerated(EnumType.STRING)
-    @Column(name = "status", nullable = false, length = 9)
+    @Column(name = "status", nullable = false, length = 17)
     private OrderStatus status;
+
+    @Column(name = "filled_quantity", nullable = false)
+    private long filledQuantity;
 
     @Column(name = "created_at", nullable = false, updatable = false)
     private Instant createdAt;
@@ -96,6 +99,14 @@ public class StockOrder {
         return status;
     }
 
+    public long getFilledQuantity() {
+        return filledQuantity;
+    }
+
+    public long getRemainingQuantity() {
+        return quantity - filledQuantity;
+    }
+
     public Instant getCreatedAt() {
         return createdAt;
     }
@@ -105,9 +116,16 @@ public class StockOrder {
     }
 
     public void cancel() {
-        if (this.status == OrderStatus.OPEN) {
+        if (this.status == OrderStatus.OPEN || this.status == OrderStatus.PARTIALLY_FILLED) {
             this.status = OrderStatus.CANCELLED;
             this.cancelledAt = Instant.now();
         }
+    }
+
+    public void applyFill(long fillQuantity) {
+        this.filledQuantity += fillQuantity;
+        this.status = this.filledQuantity >= this.quantity
+                ? OrderStatus.FILLED
+                : OrderStatus.PARTIALLY_FILLED;
     }
 }

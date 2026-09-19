@@ -14,11 +14,14 @@ public class OrderService {
     private static final int MAX_CLIENT_ORDER_ID_LENGTH = 64;
     private static final int MAX_ACCOUNT_ID_LENGTH = 64;
     private static final int MAX_SYMBOL_LENGTH = 10;
+    private static final int MAX_EXECUTION_ID_LENGTH = 64;
 
     private final StockOrderRepository repository;
+    private final TradeFillRepository tradeFillRepository;
 
-    public OrderService(StockOrderRepository repository) {
+    public OrderService(StockOrderRepository repository, TradeFillRepository tradeFillRepository) {
         this.repository = repository;
+        this.tradeFillRepository = tradeFillRepository;
     }
 
     public CreateOrderResult create(CreateOrderRequest request) {
@@ -60,8 +63,53 @@ public class OrderService {
     @Transactional
     public StockOrder cancel(String id) {
         StockOrder order = getById(id);
+        if (order.getStatus() == OrderStatus.FILLED) {
+            throw new ApiException(HttpStatus.CONFLICT, "ORDER_NOT_CANCELLABLE", "已完全成交的委托不可撤单");
+        }
         order.cancel();
         return repository.save(order);
+    }
+
+    @Transactional
+    public RegisterFillResult registerFill(String orderId, RegisterFillRequest request) {
+        StockOrder order = repository.findById(orderId)
+                .orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "ORDER_NOT_FOUND", "委托不存在"));
+        String executionId = normalize(request.executionId(), "executionId", MAX_EXECUTION_ID_LENGTH, false);
+
+        TradeFill existing = tradeFillRepository.findByExecutionId(executionId).orElse(null);
+        if (existing != null) {
+            return new RegisterFillResult(resolveDuplicateFill(existing, order, request), order, false);
+        }
+
+        if (order.getStatus() != OrderStatus.OPEN && order.getStatus() != OrderStatus.PARTIALLY_FILLED) {
+            throw new ApiException(HttpStatus.CONFLICT, "ORDER_NOT_FILLABLE",
+                    "当前状态的委托不能接收成交回报");
+        }
+        if (request.quantity() > order.getRemainingQuantity()) {
+            throw new ApiException(HttpStatus.CONFLICT, "FILL_QUANTITY_EXCEEDED",
+                    "成交数量超过委托剩余数量");
+        }
+
+        TradeFill fill = new TradeFill(executionId, order.getId(), request.quantity(), request.price());
+        order.applyFill(request.quantity());
+        try {
+            TradeFill saved = tradeFillRepository.saveAndFlush(fill);
+            return new RegisterFillResult(saved, repository.save(order), true);
+        } catch (DataIntegrityViolationException e) {
+            throw new ApiException(HttpStatus.CONFLICT, "EXECUTION_ID_CONFLICT",
+                    "executionId 已存在且请求字段不一致");
+        }
+    }
+
+    private TradeFill resolveDuplicateFill(TradeFill existing, StockOrder order, RegisterFillRequest request) {
+        boolean identical = existing.getOrderId().equals(order.getId())
+                && existing.getQuantity() == request.quantity()
+                && existing.getPrice().compareTo(request.price()) == 0;
+        if (!identical) {
+            throw new ApiException(HttpStatus.CONFLICT, "EXECUTION_ID_CONFLICT",
+                    "executionId 已存在且请求字段不一致");
+        }
+        return existing;
     }
 
     private String normalize(String value, String field, int maxLength, boolean upperCase) {
@@ -81,5 +129,8 @@ public class OrderService {
     }
 
     public record CreateOrderResult(StockOrder order, boolean created) {
+    }
+
+    public record RegisterFillResult(TradeFill fill, StockOrder order, boolean created) {
     }
 }

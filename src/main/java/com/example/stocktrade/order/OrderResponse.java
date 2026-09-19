@@ -12,6 +12,8 @@ public record OrderResponse(
         long quantity,
         BigDecimal limitPrice,
         OrderStatus status,
+        long filledQuantity,
+        long remainingQuantity,
         Instant createdAt,
         Instant cancelledAt
 ) {
@@ -25,6 +27,8 @@ public record OrderResponse(
                 order.getQuantity(),
                 order.getLimitPrice(),
                 order.getStatus(),
+                order.getFilledQuantity(),
+                order.getRemainingQuantity(),
                 order.getCreatedAt(),
                 order.getCancelledAt()
         );
