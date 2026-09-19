@@ -1,0 +1,9 @@
+.DS_Store
+.idea/
+.vscode/
+*.iml
+target/
+*.log
+data/
+*.mv.db
+*.trace.db
