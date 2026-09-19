@@ -14,11 +14,14 @@ public class OrderService {
     private static final int MAX_CLIENT_ORDER_ID_LENGTH = 64;
     private static final int MAX_ACCOUNT_ID_LENGTH = 64;
     private static final int MAX_SYMBOL_LENGTH = 10;
+    private static final int MAX_EXECUTION_ID_LENGTH = 64;
 
     private final StockOrderRepository repository;
+    private final ExecutionReportRepository executionReportRepository;
 
-    public OrderService(StockOrderRepository repository) {
+    public OrderService(StockOrderRepository repository, ExecutionReportRepository executionReportRepository) {
         this.repository = repository;
+        this.executionReportRepository = executionReportRepository;
     }
 
     public CreateOrderResult create(CreateOrderRequest request) {
@@ -60,8 +63,49 @@ public class OrderService {
     @Transactional
     public StockOrder cancel(String id) {
         StockOrder order = getById(id);
+        if (order.getStatus() == OrderStatus.FILLED) {
+            throw new ApiException(HttpStatus.CONFLICT, "ORDER_NOT_CANCELLABLE", "委托已完全成交，不能撤单");
+        }
         order.cancel();
         return repository.save(order);
+    }
+
+    @Transactional
+    public RegisterExecutionResult registerExecution(String orderId, RegisterExecutionRequest request) {
+        String executionId = normalize(request.executionId(), "executionId", MAX_EXECUTION_ID_LENGTH, false);
+        StockOrder order = repository.findByIdForUpdate(orderId)
+                .orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "ORDER_NOT_FOUND", "委托不存在"));
+
+        var existing = executionReportRepository.findByExecutionId(executionId);
+        if (existing.isPresent()) {
+            ExecutionReport report = existing.get();
+            if (report.matches(order.getId(), request.quantity(), request.price())) {
+                return new RegisterExecutionResult(report, order, false);
+            }
+            throw new ApiException(HttpStatus.CONFLICT, "EXECUTION_ID_CONFLICT",
+                    "executionId 已存在且请求字段不一致");
+        }
+
+        if (order.getStatus() != OrderStatus.OPEN && order.getStatus() != OrderStatus.PARTIALLY_FILLED) {
+            throw new ApiException(HttpStatus.CONFLICT, "ORDER_NOT_FILLABLE",
+                    "当前状态的委托不能接收成交回报");
+        }
+        if (request.quantity() > order.getRemainingQuantity()) {
+            throw new ApiException(HttpStatus.CONFLICT, "FILL_QUANTITY_EXCEEDED",
+                    "成交数量超过委托剩余数量");
+        }
+
+        ExecutionReport report = new ExecutionReport(executionId, order.getId(),
+                request.quantity(), request.price());
+        try {
+            executionReportRepository.saveAndFlush(report);
+        } catch (DataIntegrityViolationException e) {
+            throw new ApiException(HttpStatus.CONFLICT, "EXECUTION_ID_CONFLICT",
+                    "executionId 已存在且请求字段不一致");
+        }
+        order.applyFill(request.quantity());
+        repository.save(order);
+        return new RegisterExecutionResult(report, order, true);
     }
 
     private String normalize(String value, String field, int maxLength, boolean upperCase) {
@@ -81,5 +125,8 @@ public class OrderService {
     }
 
     public record CreateOrderResult(StockOrder order, boolean created) {
+    }
+
+    public record RegisterExecutionResult(ExecutionReport report, StockOrder order, boolean created) {
     }
 }

@@ -36,4 +36,12 @@ public class OrderController {
     public OrderResponse cancel(@PathVariable String id) {
         return OrderResponse.from(orderService.cancel(id));
     }
+
+    @PostMapping("/{id}/executions")
+    public ResponseEntity<ExecutionResponse> registerExecution(@PathVariable String id,
+                                                               @Valid @RequestBody RegisterExecutionRequest request) {
+        OrderService.RegisterExecutionResult result = orderService.registerExecution(id, request);
+        HttpStatus status = result.created() ? HttpStatus.CREATED : HttpStatus.OK;
+        return ResponseEntity.status(status).body(ExecutionResponse.of(result.report(), result.order()));
+    }
 }
