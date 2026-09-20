@@ -2,10 +2,19 @@ package com.example.stocktrade.order;
 
 import com.example.stocktrade.error.ApiException;
 import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.PageRequest;
+import org.springframework.data.domain.Pageable;
+import org.springframework.data.domain.Sort;
+import org.springframework.data.jpa.domain.Specification;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import jakarta.persistence.criteria.Predicate;
+
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Locale;
 
 @Service
@@ -15,6 +24,9 @@ public class OrderService {
     private static final int MAX_ACCOUNT_ID_LENGTH = 64;
     private static final int MAX_SYMBOL_LENGTH = 10;
     private static final int MAX_EXECUTION_ID_LENGTH = 64;
+    private static final int DEFAULT_PAGE = 0;
+    private static final int DEFAULT_PAGE_SIZE = 20;
+    private static final int MAX_PAGE_SIZE = 100;
 
     private final StockOrderRepository repository;
     private final ExecutionReportRepository executionReportRepository;
@@ -58,6 +70,43 @@ public class OrderService {
     public StockOrder getById(String id) {
         return repository.findById(id)
                 .orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "ORDER_NOT_FOUND", "委托不存在"));
+    }
+
+    @Transactional(readOnly = true)
+    public Page<StockOrder> query(String accountId, String symbol, String status, String side,
+                                  Integer page, Integer size) {
+        String normalizedAccountId = normalize(accountId, "accountId", MAX_ACCOUNT_ID_LENGTH, false);
+        String normalizedSymbol = symbol == null ? null : normalize(symbol, "symbol", MAX_SYMBOL_LENGTH, true);
+        OrderStatus statusFilter = parseEnum(OrderStatus.class, status, "status");
+        OrderSide sideFilter = parseEnum(OrderSide.class, side, "side");
+
+        int pageNumber = page == null ? DEFAULT_PAGE : page;
+        int pageSize = size == null ? DEFAULT_PAGE_SIZE : size;
+        if (pageNumber < 0) {
+            throw new ApiException(HttpStatus.BAD_REQUEST, "VALIDATION_ERROR", "page 不能小于 0");
+        }
+        if (pageSize < 1 || pageSize > MAX_PAGE_SIZE) {
+            throw new ApiException(HttpStatus.BAD_REQUEST, "VALIDATION_ERROR",
+                    "size 必须在 1 到 " + MAX_PAGE_SIZE + " 之间");
+        }
+
+        Specification<StockOrder> spec = (root, query, cb) -> {
+            List<Predicate> predicates = new ArrayList<>();
+            predicates.add(cb.equal(root.get("accountId"), normalizedAccountId));
+            if (normalizedSymbol != null) {
+                predicates.add(cb.equal(root.get("symbol"), normalizedSymbol));
+            }
+            if (statusFilter != null) {
+                predicates.add(cb.equal(root.get("status"), statusFilter));
+            }
+            if (sideFilter != null) {
+                predicates.add(cb.equal(root.get("side"), sideFilter));
+            }
+            return cb.and(predicates.toArray(new Predicate[0]));
+        };
+        Pageable pageable = PageRequest.of(pageNumber, pageSize,
+                Sort.by(Sort.Direction.DESC, "createdAt").and(Sort.by(Sort.Direction.DESC, "id")));
+        return repository.findAll(spec, pageable);
     }
 
     @Transactional
@@ -122,6 +171,21 @@ public class OrderService {
                     field + " 最长 " + maxLength + " 个字符");
         }
         return normalized;
+    }
+
+    private <E extends Enum<E>> E parseEnum(Class<E> type, String value, String field) {
+        if (value == null) {
+            return null;
+        }
+        String trimmed = value.trim();
+        if (trimmed.isEmpty()) {
+            throw new ApiException(HttpStatus.BAD_REQUEST, "VALIDATION_ERROR", field + " 不能为空");
+        }
+        try {
+            return Enum.valueOf(type, trimmed.toUpperCase(Locale.ROOT));
+        } catch (IllegalArgumentException e) {
+            throw new ApiException(HttpStatus.BAD_REQUEST, "VALIDATION_ERROR", field + " 取值非法");
+        }
     }
 
     public record CreateOrderResult(StockOrder order, boolean created) {

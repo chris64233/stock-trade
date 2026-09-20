@@ -8,6 +8,7 @@ import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 @RestController
@@ -30,6 +31,16 @@ public class OrderController {
     @GetMapping("/{id}")
     public OrderResponse getById(@PathVariable String id) {
         return OrderResponse.from(orderService.getById(id));
+    }
+
+    @GetMapping
+    public OrderPageResponse query(@RequestParam String accountId,
+                                   @RequestParam(required = false) String symbol,
+                                   @RequestParam(required = false) String status,
+                                   @RequestParam(required = false) String side,
+                                   @RequestParam(required = false) Integer page,
+                                   @RequestParam(required = false) Integer size) {
+        return OrderPageResponse.from(orderService.query(accountId, symbol, status, side, page, size));
     }
 
     @PostMapping("/{id}/cancel")
