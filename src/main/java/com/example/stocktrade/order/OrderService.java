@@ -11,6 +11,9 @@ import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.math.BigDecimal;
+import java.math.RoundingMode;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
@@ -77,6 +80,43 @@ public class OrderService {
                 Sort.by(Sort.Order.asc("executedAt"), Sort.Order.asc("id")));
         Page<ExecutionReport> executions = executionReportRepository.findByOrderId(orderId, pageable);
         return new OrderExecutionsResult(order, executions);
+    }
+
+    @Transactional(readOnly = true)
+    public ExecutionSummaryResponse getExecutionSummary(String orderId) {
+        StockOrder order = repository.findById(orderId)
+                .orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "ORDER_NOT_FOUND", "委托不存在"));
+        List<ExecutionReport> executions = executionReportRepository.findByOrderId(orderId);
+
+        BigDecimal totalExecutedAmount = BigDecimal.ZERO.setScale(4, RoundingMode.HALF_UP);
+        BigDecimal averageExecutionPrice = null;
+        Instant lastExecutedAt = null;
+        if (!executions.isEmpty()) {
+            BigDecimal amount = BigDecimal.ZERO;
+            long totalQuantity = 0;
+            for (ExecutionReport report : executions) {
+                amount = amount.add(report.getPrice().multiply(BigDecimal.valueOf(report.getQuantity())));
+                totalQuantity += report.getQuantity();
+                if (lastExecutedAt == null || report.getExecutedAt().isAfter(lastExecutedAt)) {
+                    lastExecutedAt = report.getExecutedAt();
+                }
+            }
+            totalExecutedAmount = amount.setScale(4, RoundingMode.HALF_UP);
+            averageExecutionPrice = amount
+                    .divide(BigDecimal.valueOf(totalQuantity), 4, RoundingMode.HALF_UP);
+        }
+
+        return new ExecutionSummaryResponse(
+                order.getId(),
+                order.getStatus(),
+                order.getQuantity(),
+                order.getFilledQuantity(),
+                order.getRemainingQuantity(),
+                executions.size(),
+                totalExecutedAmount,
+                averageExecutionPrice,
+                lastExecutedAt
+        );
     }
 
     @Transactional(readOnly = true)

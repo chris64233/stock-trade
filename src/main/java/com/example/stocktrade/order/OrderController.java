@@ -63,4 +63,9 @@ public class OrderController {
         OrderService.OrderExecutionsResult result = orderService.listExecutions(id, page, size);
         return ExecutionPageResponse.from(result.order(), result.executions());
     }
+
+    @GetMapping("/{id}/execution-summary")
+    public ExecutionSummaryResponse getExecutionSummary(@PathVariable String id) {
+        return orderService.getExecutionSummary(id);
+    }
 }
