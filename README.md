@@ -26,3 +26,6 @@
 - `POST /api/orders/{id}/cancel` 撤单（`FILLED` 不可撤，重复撤单幂等）
 - `POST /api/orders/{id}/executions` 登记成交回报，请求体为 `executionId`、`quantity`、`price`；
   `executionId` 全局唯一，相同字段重复提交返回原成交回报（200），字段不一致返回 409
+- `GET /api/orders/{id}/executions` 分页查询指定委托的成交明细，支持 `page`（默认 0，不小于 0）
+  和 `size`（默认 20，1 到 100）查询参数；按 `executedAt` 升序、`id` 升序排序，
+  响应包含委托当前的 `orderStatus`、`filledQuantity`、`remainingQuantity` 及分页信息

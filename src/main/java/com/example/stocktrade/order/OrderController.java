@@ -33,6 +33,13 @@ public class OrderController {
         return OrderResponse.from(orderService.getById(id));
     }
 
+    @GetMapping("/{id}/executions")
+    public ExecutionPageResponse listExecutions(@PathVariable String id,
+                                                @RequestParam(defaultValue = "0") String page,
+                                                @RequestParam(defaultValue = "20") String size) {
+        return orderService.listExecutions(id, page, size);
+    }
+
     @GetMapping
     public OrderPageResponse search(@RequestParam(required = false) String accountId,
                                     @RequestParam(required = false) String symbol,

@@ -68,6 +68,17 @@ public class OrderService {
     }
 
     @Transactional(readOnly = true)
+    public ExecutionPageResponse listExecutions(String orderId, String page, String size) {
+        StockOrder order = getById(orderId);
+        int pageNumber = parsePage(page, "page", 0, Integer.MAX_VALUE);
+        int pageSize = parsePage(size, "size", 1, 100);
+        Pageable pageable = PageRequest.of(pageNumber, pageSize,
+                Sort.by(Sort.Order.asc("executedAt"), Sort.Order.asc("id")));
+        Page<ExecutionReport> executions = executionReportRepository.findByOrderId(orderId, pageable);
+        return ExecutionPageResponse.of(order, executions);
+    }
+
+    @Transactional(readOnly = true)
     public Page<StockOrder> search(String accountId, String symbol, String status, String side,
                                    String page, String size) {
         String normalizedAccountId = normalize(accountId, "accountId", MAX_ACCOUNT_ID_LENGTH, false);
