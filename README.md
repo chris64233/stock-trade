@@ -26,3 +26,5 @@
 - `POST /api/orders/{id}/cancel` 撤单（`FILLED` 不可撤，重复撤单幂等）
 - `POST /api/orders/{id}/executions` 登记成交回报，请求体为 `executionId`、`quantity`、`price`；
   `executionId` 全局唯一，相同字段重复提交返回原成交回报（200），字段不一致返回 409
+- `GET /api/orders/{id}/execution-summary` 查询指定委托的成交汇总（成交笔数、总成交金额、
+  加权平均成交价、最晚成交时间等，金额与均价均保留 4 位小数）

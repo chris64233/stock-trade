@@ -11,6 +11,9 @@ import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.math.BigDecimal;
+import java.math.RoundingMode;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
@@ -65,6 +68,40 @@ public class OrderService {
     public StockOrder getById(String id) {
         return repository.findById(id)
                 .orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "ORDER_NOT_FOUND", "委托不存在"));
+    }
+
+    @Transactional(readOnly = true)
+    public ExecutionSummaryResponse getExecutionSummary(String orderId) {
+        StockOrder order = repository.findById(orderId)
+                .orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "ORDER_NOT_FOUND", "委托不存在"));
+        List<ExecutionReport> executions = executionReportRepository.findByOrderId(orderId);
+
+        long filledQuantity = 0;
+        BigDecimal totalExecutedAmount = BigDecimal.ZERO;
+        Instant lastExecutedAt = null;
+        for (ExecutionReport execution : executions) {
+            filledQuantity += execution.getQuantity();
+            totalExecutedAmount = totalExecutedAmount.add(
+                    execution.getPrice().multiply(BigDecimal.valueOf(execution.getQuantity())));
+            if (lastExecutedAt == null || execution.getExecutedAt().isAfter(lastExecutedAt)) {
+                lastExecutedAt = execution.getExecutedAt();
+            }
+        }
+        totalExecutedAmount = totalExecutedAmount.setScale(4, RoundingMode.HALF_UP);
+        BigDecimal averageExecutionPrice = filledQuantity == 0 ? null
+                : totalExecutedAmount.divide(BigDecimal.valueOf(filledQuantity), 4, RoundingMode.HALF_UP);
+
+        return new ExecutionSummaryResponse(
+                order.getId(),
+                order.getStatus(),
+                order.getQuantity(),
+                filledQuantity,
+                order.getQuantity() - filledQuantity,
+                executions.size(),
+                totalExecutedAmount,
+                averageExecutionPrice,
+                lastExecutedAt
+        );
     }
 
     @Transactional(readOnly = true)
