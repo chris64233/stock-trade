@@ -2,10 +2,17 @@ package com.example.stocktrade.order;
 
 import com.example.stocktrade.error.ApiException;
 import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.PageRequest;
+import org.springframework.data.domain.Pageable;
+import org.springframework.data.domain.Sort;
+import org.springframework.data.jpa.domain.Specification;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Locale;
 
 @Service
@@ -58,6 +65,70 @@ public class OrderService {
     public StockOrder getById(String id) {
         return repository.findById(id)
                 .orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "ORDER_NOT_FOUND", "委托不存在"));
+    }
+
+    @Transactional(readOnly = true)
+    public Page<StockOrder> search(String accountId, String symbol, String status, String side,
+                                   String page, String size) {
+        String normalizedAccountId = normalize(accountId, "accountId", MAX_ACCOUNT_ID_LENGTH, false);
+        String normalizedSymbol = symbol == null ? null
+                : normalize(symbol, "symbol", MAX_SYMBOL_LENGTH, true);
+        OrderStatus statusFilter = parseEnum(status, OrderStatus.class, "status");
+        OrderSide sideFilter = parseEnum(side, OrderSide.class, "side");
+        int pageNumber = parsePage(page, "page", 0, Integer.MAX_VALUE);
+        int pageSize = parsePage(size, "size", 1, 100);
+
+        Specification<StockOrder> spec = (root, query, cb) -> {
+            List<jakarta.persistence.criteria.Predicate> predicates = new ArrayList<>();
+            predicates.add(cb.equal(root.get("accountId"), normalizedAccountId));
+            if (normalizedSymbol != null) {
+                predicates.add(cb.equal(root.get("symbol"), normalizedSymbol));
+            }
+            if (statusFilter != null) {
+                predicates.add(cb.equal(root.get("status"), statusFilter));
+            }
+            if (sideFilter != null) {
+                predicates.add(cb.equal(root.get("side"), sideFilter));
+            }
+            return cb.and(predicates.toArray(new jakarta.persistence.criteria.Predicate[0]));
+        };
+        Pageable pageable = PageRequest.of(pageNumber, pageSize,
+                Sort.by(Sort.Order.desc("createdAt"), Sort.Order.desc("id")));
+        return repository.findAll(spec, pageable);
+    }
+
+    private <E extends Enum<E>> E parseEnum(String value, Class<E> enumType, String field) {
+        if (value == null) {
+            return null;
+        }
+        String trimmed = value.trim();
+        if (trimmed.isEmpty()) {
+            throw new ApiException(HttpStatus.BAD_REQUEST, "VALIDATION_ERROR", field + " 不能为空");
+        }
+        try {
+            return Enum.valueOf(enumType, trimmed.toUpperCase(Locale.ROOT));
+        } catch (IllegalArgumentException e) {
+            throw new ApiException(HttpStatus.BAD_REQUEST, "VALIDATION_ERROR", field + " 取值非法");
+        }
+    }
+
+    private int parsePage(String value, String field, int min, int max) {
+        int parsed;
+        try {
+            parsed = Integer.parseInt(value.trim());
+        } catch (NumberFormatException e) {
+            throw invalidPage(field, min, max);
+        }
+        if (parsed < min || parsed > max) {
+            throw invalidPage(field, min, max);
+        }
+        return parsed;
+    }
+
+    private ApiException invalidPage(String field, int min, int max) {
+        String range = max == Integer.MAX_VALUE ? "不小于 " + min + " 的整数"
+                : min + " 到 " + max + " 之间的整数";
+        return new ApiException(HttpStatus.BAD_REQUEST, "VALIDATION_ERROR", field + " 必须是" + range);
     }
 
     @Transactional
