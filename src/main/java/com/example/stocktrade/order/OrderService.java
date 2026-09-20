@@ -68,6 +68,18 @@ public class OrderService {
     }
 
     @Transactional(readOnly = true)
+    public OrderExecutionsResult listExecutions(String orderId, String page, String size) {
+        StockOrder order = repository.findById(orderId)
+                .orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "ORDER_NOT_FOUND", "委托不存在"));
+        int pageNumber = parsePage(page == null ? "0" : page, "page", 0, Integer.MAX_VALUE);
+        int pageSize = parsePage(size == null ? "20" : size, "size", 1, 100);
+        Pageable pageable = PageRequest.of(pageNumber, pageSize,
+                Sort.by(Sort.Order.asc("executedAt"), Sort.Order.asc("id")));
+        Page<ExecutionReport> executions = executionReportRepository.findByOrderId(orderId, pageable);
+        return new OrderExecutionsResult(order, executions);
+    }
+
+    @Transactional(readOnly = true)
     public Page<StockOrder> search(String accountId, String symbol, String status, String side,
                                    String page, String size) {
         String normalizedAccountId = normalize(accountId, "accountId", MAX_ACCOUNT_ID_LENGTH, false);
@@ -199,5 +211,8 @@ public class OrderService {
     }
 
     public record RegisterExecutionResult(ExecutionReport report, StockOrder order, boolean created) {
+    }
+
+    public record OrderExecutionsResult(StockOrder order, Page<ExecutionReport> executions) {
     }
 }

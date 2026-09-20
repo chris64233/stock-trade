@@ -55,4 +55,12 @@ public class OrderController {
         HttpStatus status = result.created() ? HttpStatus.CREATED : HttpStatus.OK;
         return ResponseEntity.status(status).body(ExecutionResponse.of(result.report(), result.order()));
     }
+
+    @GetMapping("/{id}/executions")
+    public ExecutionPageResponse listExecutions(@PathVariable String id,
+                                                @RequestParam(required = false) String page,
+                                                @RequestParam(required = false) String size) {
+        OrderService.OrderExecutionsResult result = orderService.listExecutions(id, page, size);
+        return ExecutionPageResponse.from(result.order(), result.executions());
+    }
 }
