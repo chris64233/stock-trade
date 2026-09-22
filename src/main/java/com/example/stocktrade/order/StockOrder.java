@@ -123,6 +123,19 @@ public class StockOrder {
                 : OrderStatus.PARTIALLY_FILLED;
     }
 
+    public void reverseFill(long fillQuantity) {
+        if (fillQuantity <= 0 || fillQuantity > this.filledQuantity) {
+            throw new IllegalStateException("撤销的成交数量超过当前已成交数量");
+        }
+        this.filledQuantity -= fillQuantity;
+        if (this.status == OrderStatus.CANCELLED) {
+            return;
+        }
+        this.status = this.filledQuantity == 0
+                ? OrderStatus.OPEN
+                : OrderStatus.PARTIALLY_FILLED;
+    }
+
     public void amend(long newQuantity, BigDecimal newLimitPrice) {
         if (this.status != OrderStatus.OPEN && this.status != OrderStatus.PARTIALLY_FILLED) {
             throw new IllegalStateException("只有 OPEN 或 PARTIALLY_FILLED 状态的委托可以改单");

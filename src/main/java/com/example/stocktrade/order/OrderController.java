@@ -69,6 +69,15 @@ public class OrderController {
         return ResponseEntity.status(status).body(ExecutionResponse.of(result.report(), result.order()));
     }
 
+    @PostMapping("/{id}/executions/reversals")
+    public ResponseEntity<ExecutionReversalResponse> reverseExecution(@PathVariable String id,
+                                                                      @Valid @RequestBody ReverseExecutionRequest request) {
+        OrderService.ReverseExecutionResult result =
+                orderService.reverseExecution(id, request.reversalId(), request.executionId());
+        HttpStatus status = result.created() ? HttpStatus.CREATED : HttpStatus.OK;
+        return ResponseEntity.status(status).body(ExecutionReversalResponse.from(result.reversal()));
+    }
+
     @GetMapping("/{id}/executions")
     public ExecutionPageResponse listExecutions(@PathVariable String id,
                                                 @RequestParam(required = false) String page,

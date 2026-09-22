@@ -26,17 +26,21 @@ public class OrderService {
     private static final int MAX_SYMBOL_LENGTH = 10;
     private static final int MAX_EXECUTION_ID_LENGTH = 64;
     private static final int MAX_AMEND_ID_LENGTH = 64;
+    private static final int MAX_REVERSAL_ID_LENGTH = 64;
 
     private final StockOrderRepository repository;
     private final ExecutionReportRepository executionReportRepository;
     private final OrderAmendmentRepository amendmentRepository;
+    private final ExecutionReversalRepository reversalRepository;
 
     public OrderService(StockOrderRepository repository,
                         ExecutionReportRepository executionReportRepository,
-                        OrderAmendmentRepository amendmentRepository) {
+                        OrderAmendmentRepository amendmentRepository,
+                        ExecutionReversalRepository reversalRepository) {
         this.repository = repository;
         this.executionReportRepository = executionReportRepository;
         this.amendmentRepository = amendmentRepository;
+        this.reversalRepository = reversalRepository;
     }
 
     public CreateOrderResult create(CreateOrderRequest request) {
@@ -84,7 +88,12 @@ public class OrderService {
         long filledQuantity = 0;
         BigDecimal totalExecutedAmount = BigDecimal.ZERO;
         Instant lastExecutedAt = null;
+        long executionCount = 0;
         for (ExecutionReport execution : executions) {
+            if (execution.isReversed()) {
+                continue;
+            }
+            executionCount++;
             filledQuantity += execution.getQuantity();
             totalExecutedAmount = totalExecutedAmount.add(
                     execution.getPrice().multiply(BigDecimal.valueOf(execution.getQuantity())));
@@ -102,7 +111,7 @@ public class OrderService {
                 order.getQuantity(),
                 filledQuantity,
                 order.getQuantity() - filledQuantity,
-                executions.size(),
+                executionCount,
                 totalExecutedAmount,
                 averageExecutionPrice,
                 lastExecutedAt
@@ -246,6 +255,10 @@ public class OrderService {
         var existing = executionReportRepository.findByExecutionId(executionId);
         if (existing.isPresent()) {
             ExecutionReport report = existing.get();
+            if (report.isReversed()) {
+                throw new ApiException(HttpStatus.CONFLICT, "EXECUTION_ALREADY_REVERSED",
+                        "该成交标识对应一笔已撤销的成交回报，不能重复登记");
+            }
             if (report.matches(order.getId(), request.quantity(), request.price())) {
                 return new RegisterExecutionResult(report, order, false);
             }
@@ -275,6 +288,64 @@ public class OrderService {
         return new RegisterExecutionResult(report, order, true);
     }
 
+    @Transactional
+    public ReverseExecutionResult reverseExecution(String orderId, String rawReversalId, String rawExecutionId) {
+        String reversalId = normalize(rawReversalId, "reversalId", MAX_REVERSAL_ID_LENGTH, false);
+        String executionId = normalize(rawExecutionId, "executionId", MAX_EXECUTION_ID_LENGTH, false);
+
+        if (orderId != null
+                && repository.findById(orderId).isEmpty()) {
+            throw new ApiException(HttpStatus.NOT_FOUND, "ORDER_NOT_FOUND", "委托不存在");
+        }
+
+        ExecutionReport report = executionReportRepository.findByExecutionId(executionId)
+                .orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "EXECUTION_NOT_FOUND", "成交回报不存在"));
+        if (orderId != null && !report.getOrderId().equals(orderId)) {
+            throw new ApiException(HttpStatus.NOT_FOUND, "EXECUTION_NOT_FOUND", "成交回报不存在");
+        }
+
+        StockOrder order = repository.findByIdForUpdate(report.getOrderId())
+                .orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "ORDER_NOT_FOUND", "委托不存在"));
+
+        var existingReversal = reversalRepository.findByReversalId(reversalId);
+        if (existingReversal.isPresent()) {
+            ExecutionReversal reversal = existingReversal.get();
+            if (reversal.getExecutionId().equals(executionId)) {
+                return new ReverseExecutionResult(reversal, false);
+            }
+            throw new ApiException(HttpStatus.CONFLICT, "REVERSAL_ID_CONFLICT",
+                    "reversalId 已存在且对应不同的成交回报");
+        }
+
+        if (report.isReversed() || reversalRepository.findByExecutionId(executionId).isPresent()) {
+            throw new ApiException(HttpStatus.CONFLICT, "EXECUTION_ALREADY_REVERSED",
+                    "成交回报已被撤销");
+        }
+
+        order.reverseFill(report.getQuantity());
+        ExecutionReversal reversal = new ExecutionReversal(reversalId, report,
+                order.getStatus(), order.getFilledQuantity(), order.getRemainingQuantity());
+        report.markReversed(reversal.getReversedAt());
+        try {
+            reversalRepository.saveAndFlush(reversal);
+        } catch (DataIntegrityViolationException e) {
+            throw translateReversalConstraintViolation(e);
+        }
+        executionReportRepository.saveAndFlush(report);
+        repository.saveAndFlush(order);
+        return new ReverseExecutionResult(reversal, true);
+    }
+
+    private ApiException translateReversalConstraintViolation(DataIntegrityViolationException ex) {
+        String message = String.valueOf(ex.getMostSpecificCause().getMessage());
+        if (message.contains("REVERSAL_ID")) {
+            return new ApiException(HttpStatus.CONFLICT, "REVERSAL_ID_CONFLICT",
+                    "reversalId 已存在");
+        }
+        return new ApiException(HttpStatus.CONFLICT, "EXECUTION_ALREADY_REVERSED",
+                "成交回报已被撤销");
+    }
+
     private String normalize(String value, String field, int maxLength, boolean upperCase) {
         if (value == null) {
             throw new ApiException(HttpStatus.BAD_REQUEST, "VALIDATION_ERROR", field + " 不能为空");
@@ -301,5 +372,8 @@ public class OrderService {
     }
 
     public record AmendOrderResult(OrderAmendment amendment, boolean created) {
+    }
+
+    public record ReverseExecutionResult(ExecutionReversal reversal, boolean created) {
     }
 }
