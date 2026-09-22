@@ -37,7 +37,10 @@ public record ExecutionPageResponse(
             String orderId,
             long quantity,
             BigDecimal price,
-            Instant executedAt
+            Instant executedAt,
+            boolean revoked,
+            String revokeId,
+            Instant revokedAt
     ) {
         public static ExecutionItem from(ExecutionReport report) {
             return new ExecutionItem(
@@ -46,7 +49,10 @@ public record ExecutionPageResponse(
                     report.getOrderId(),
                     report.getQuantity(),
                     report.getPrice(),
-                    report.getExecutedAt()
+                    report.getExecutedAt(),
+                    report.isRevoked(),
+                    report.getRevokeId(),
+                    report.getRevokedAt()
             );
         }
     }

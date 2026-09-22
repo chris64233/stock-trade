@@ -32,6 +32,15 @@ public class ExecutionReport {
     @Column(name = "executed_at", nullable = false, updatable = false)
     private Instant executedAt;
 
+    @Column(name = "revoked", nullable = false)
+    private boolean revoked;
+
+    @Column(name = "revoke_id", length = 64)
+    private String revokeId;
+
+    @Column(name = "revoked_at")
+    private Instant revokedAt;
+
     protected ExecutionReport() {
     }
 
@@ -72,5 +81,26 @@ public class ExecutionReport {
 
     public Instant getExecutedAt() {
         return executedAt;
+    }
+
+    public boolean isRevoked() {
+        return revoked;
+    }
+
+    public String getRevokeId() {
+        return revokeId;
+    }
+
+    public Instant getRevokedAt() {
+        return revokedAt;
+    }
+
+    public void markRevoked(String revokeId) {
+        if (this.revoked) {
+            throw new IllegalStateException("成交回报已撤销");
+        }
+        this.revoked = true;
+        this.revokeId = revokeId;
+        this.revokedAt = Instant.now();
     }
 }

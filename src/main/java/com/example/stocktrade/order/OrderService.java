@@ -26,17 +26,21 @@ public class OrderService {
     private static final int MAX_SYMBOL_LENGTH = 10;
     private static final int MAX_EXECUTION_ID_LENGTH = 64;
     private static final int MAX_AMEND_ID_LENGTH = 64;
+    private static final int MAX_REVOKE_ID_LENGTH = 64;
 
     private final StockOrderRepository repository;
     private final ExecutionReportRepository executionReportRepository;
     private final OrderAmendmentRepository amendmentRepository;
+    private final ExecutionRevocationRepository revocationRepository;
 
     public OrderService(StockOrderRepository repository,
                         ExecutionReportRepository executionReportRepository,
-                        OrderAmendmentRepository amendmentRepository) {
+                        OrderAmendmentRepository amendmentRepository,
+                        ExecutionRevocationRepository revocationRepository) {
         this.repository = repository;
         this.executionReportRepository = executionReportRepository;
         this.amendmentRepository = amendmentRepository;
+        this.revocationRepository = revocationRepository;
     }
 
     public CreateOrderResult create(CreateOrderRequest request) {
@@ -85,6 +89,9 @@ public class OrderService {
         BigDecimal totalExecutedAmount = BigDecimal.ZERO;
         Instant lastExecutedAt = null;
         for (ExecutionReport execution : executions) {
+            if (execution.isRevoked()) {
+                continue;
+            }
             filledQuantity += execution.getQuantity();
             totalExecutedAmount = totalExecutedAmount.add(
                     execution.getPrice().multiply(BigDecimal.valueOf(execution.getQuantity())));
@@ -92,6 +99,7 @@ public class OrderService {
                 lastExecutedAt = execution.getExecutedAt();
             }
         }
+        long executionCount = executions.stream().filter(execution -> !execution.isRevoked()).count();
         totalExecutedAmount = totalExecutedAmount.setScale(4, RoundingMode.HALF_UP);
         BigDecimal averageExecutionPrice = filledQuantity == 0 ? null
                 : totalExecutedAmount.divide(BigDecimal.valueOf(filledQuantity), 4, RoundingMode.HALF_UP);
@@ -99,13 +107,13 @@ public class OrderService {
         return new ExecutionSummaryResponse(
                 order.getId(),
                 order.getStatus(),
-                order.getQuantity(),
-                filledQuantity,
-                order.getQuantity() - filledQuantity,
-                executions.size(),
-                totalExecutedAmount,
-                averageExecutionPrice,
-                lastExecutedAt
+            order.getQuantity(),
+            filledQuantity,
+            order.getQuantity() - filledQuantity,
+            executionCount,
+            totalExecutedAmount,
+            averageExecutionPrice,
+            lastExecutedAt
         );
     }
 
@@ -246,6 +254,10 @@ public class OrderService {
         var existing = executionReportRepository.findByExecutionId(executionId);
         if (existing.isPresent()) {
             ExecutionReport report = existing.get();
+            if (report.isRevoked()) {
+                throw new ApiException(HttpStatus.CONFLICT, "EXECUTION_ID_CONFLICT",
+                        "executionId 对应的成交回报已撤销，不能恢复或重复登记");
+            }
             if (report.matches(order.getId(), request.quantity(), request.price())) {
                 return new RegisterExecutionResult(report, order, false);
             }
@@ -275,6 +287,52 @@ public class OrderService {
         return new RegisterExecutionResult(report, order, true);
     }
 
+    @Transactional
+    public RevokeExecutionResult revokeExecution(RevokeExecutionRequest request) {
+        String revokeId = normalize(request.revokeId(), "revokeId", MAX_REVOKE_ID_LENGTH, false);
+        String executionId = normalize(request.executionId(), "executionId",
+                MAX_EXECUTION_ID_LENGTH, false);
+
+        ExecutionReport report = executionReportRepository.findByExecutionIdForUpdate(executionId)
+                .orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "EXECUTION_NOT_FOUND",
+                        "成交回报不存在"));
+
+        var existingRevocation = revocationRepository.findByRevokeId(revokeId);
+        if (existingRevocation.isPresent()) {
+            ExecutionRevocation revocation = existingRevocation.get();
+            if (revocation.getExecutionId().equals(executionId)) {
+                return new RevokeExecutionResult(revocation, report.getExecutedAt(), false);
+            }
+            throw new ApiException(HttpStatus.CONFLICT, "REVOKE_ID_CONFLICT",
+                    "revokeId 已用于撤销其他成交回报");
+        }
+
+        if (report.isRevoked()) {
+            throw new ApiException(HttpStatus.CONFLICT, "EXECUTION_ALREADY_REVOKED",
+                    "成交回报已被其他撤销请求处理");
+        }
+
+        StockOrder order = repository.findByIdForUpdate(report.getOrderId())
+                .orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "ORDER_NOT_FOUND", "委托不存在"));
+
+        order.reverseFill(report.getQuantity());
+        report.markRevoked(revokeId);
+        ExecutionRevocation revocation = new ExecutionRevocation(
+                revokeId, report.getExecutionId(), order.getId(), report.getQuantity(),
+                report.getPrice(), order.getStatus(), order.getFilledQuantity(),
+                order.getRemainingQuantity());
+
+        try {
+            revocationRepository.saveAndFlush(revocation);
+        } catch (DataIntegrityViolationException e) {
+            throw new ApiException(HttpStatus.CONFLICT, "REVOKE_ID_CONFLICT",
+                    "撤销请求与已处理的撤销冲突");
+        }
+        executionReportRepository.saveAndFlush(report);
+        repository.save(order);
+        return new RevokeExecutionResult(revocation, report.getExecutedAt(), true);
+    }
+
     private String normalize(String value, String field, int maxLength, boolean upperCase) {
         if (value == null) {
             throw new ApiException(HttpStatus.BAD_REQUEST, "VALIDATION_ERROR", field + " 不能为空");
@@ -301,5 +359,8 @@ public class OrderService {
     }
 
     public record AmendOrderResult(OrderAmendment amendment, boolean created) {
+    }
+
+    public record RevokeExecutionResult(ExecutionRevocation revocation, Instant executedAt, boolean created) {
     }
 }

@@ -140,4 +140,16 @@ public class StockOrder {
             this.cancelledAt = Instant.now();
         }
     }
+
+    public void reverseFill(long reversedQuantity) {
+        if (reversedQuantity <= 0 || reversedQuantity > this.filledQuantity) {
+            throw new IllegalStateException("撤销数量不能超过已成交数量");
+        }
+        this.filledQuantity -= reversedQuantity;
+        if (this.status != OrderStatus.CANCELLED) {
+            this.status = this.filledQuantity == 0
+                    ? OrderStatus.OPEN
+                    : OrderStatus.PARTIALLY_FILLED;
+        }
+    }
 }
