@@ -61,6 +61,14 @@ public class OrderController {
         return ResponseEntity.status(status).body(ExecutionResponse.of(result.report(), result.order()));
     }
 
+    @PostMapping("/{id}/amendments")
+    public ResponseEntity<AmendmentResponse> amend(@PathVariable String id,
+                                                   @Valid @RequestBody AmendOrderRequest request) {
+        OrderService.AmendOrderResult result = orderService.amend(id, request);
+        HttpStatus status = result.created() ? HttpStatus.CREATED : HttpStatus.OK;
+        return ResponseEntity.status(status).body(AmendmentResponse.of(result.amendment(), result.status()));
+    }
+
     @GetMapping("/{id}/executions")
     public ExecutionPageResponse listExecutions(@PathVariable String id,
                                                 @RequestParam(required = false) String page,

@@ -32,10 +32,10 @@ public class StockOrder {
     @Column(name = "side", nullable = false, updatable = false, length = 4)
     private OrderSide side;
 
-    @Column(name = "quantity", nullable = false, updatable = false)
+    @Column(name = "quantity", nullable = false)
     private long quantity;
 
-    @Column(name = "limit_price", nullable = false, updatable = false, precision = 19, scale = 4)
+    @Column(name = "limit_price", nullable = false, precision = 19, scale = 4)
     private BigDecimal limitPrice;
 
     @Enumerated(EnumType.STRING)
@@ -128,5 +128,10 @@ public class StockOrder {
             this.status = OrderStatus.CANCELLED;
             this.cancelledAt = Instant.now();
         }
+    }
+
+    public void amend(long newQuantity, BigDecimal newLimitPrice) {
+        this.quantity = newQuantity;
+        this.limitPrice = newLimitPrice;
     }
 }

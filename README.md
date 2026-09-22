@@ -26,5 +26,9 @@
 - `POST /api/orders/{id}/cancel` 撤单（`FILLED` 不可撤，重复撤单幂等）
 - `POST /api/orders/{id}/executions` 登记成交回报，请求体为 `executionId`、`quantity`、`price`；
   `executionId` 全局唯一，相同字段重复提交返回原成交回报（200），字段不一致返回 409
+- `POST /api/orders/{id}/amendments` 委托改单，请求体为 `amendmentId`、`quantity`、`limitPrice`；
+  仅 `OPEN`/`PARTIALLY_FILLED` 委托可改单，新总数量必须严格大于已成交数量，改单审计（修改前后总数量与限价、
+  改单时间）与委托更新在同一事务内提交；`amendmentId` 全局唯一，相同字段重复提交返回首次改单结果（200，
+  即使委托之后又被成交或撤销），字段不一致返回 409，不可改单状态或数量边界不满足返回 409
 - `GET /api/orders/{id}/execution-summary` 查询指定委托的成交汇总（成交笔数、总成交金额、
   加权平均成交价、最晚成交时间等，金额与均价均保留 4 位小数）
