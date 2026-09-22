@@ -32,10 +32,10 @@ public class StockOrder {
     @Column(name = "side", nullable = false, updatable = false, length = 4)
     private OrderSide side;
 
-    @Column(name = "quantity", nullable = false, updatable = false)
+    @Column(name = "quantity", nullable = false)
     private long quantity;
 
-    @Column(name = "limit_price", nullable = false, updatable = false, precision = 19, scale = 4)
+    @Column(name = "limit_price", nullable = false, precision = 19, scale = 4)
     private BigDecimal limitPrice;
 
     @Enumerated(EnumType.STRING)
@@ -121,6 +121,17 @@ public class StockOrder {
         this.status = this.filledQuantity >= this.quantity
                 ? OrderStatus.FILLED
                 : OrderStatus.PARTIALLY_FILLED;
+    }
+
+    public void amend(long newQuantity, BigDecimal newLimitPrice) {
+        if (this.status != OrderStatus.OPEN && this.status != OrderStatus.PARTIALLY_FILLED) {
+            throw new IllegalStateException("只有 OPEN 或 PARTIALLY_FILLED 状态的委托可以改单");
+        }
+        if (newQuantity <= this.filledQuantity) {
+            throw new IllegalStateException("改单后的总数量必须严格大于已成交数量");
+        }
+        this.quantity = newQuantity;
+        this.limitPrice = newLimitPrice;
     }
 
     public void cancel() {

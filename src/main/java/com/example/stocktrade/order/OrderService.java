@@ -25,13 +25,18 @@ public class OrderService {
     private static final int MAX_ACCOUNT_ID_LENGTH = 64;
     private static final int MAX_SYMBOL_LENGTH = 10;
     private static final int MAX_EXECUTION_ID_LENGTH = 64;
+    private static final int MAX_AMEND_ID_LENGTH = 64;
 
     private final StockOrderRepository repository;
     private final ExecutionReportRepository executionReportRepository;
+    private final OrderAmendmentRepository amendmentRepository;
 
-    public OrderService(StockOrderRepository repository, ExecutionReportRepository executionReportRepository) {
+    public OrderService(StockOrderRepository repository,
+                        ExecutionReportRepository executionReportRepository,
+                        OrderAmendmentRepository amendmentRepository) {
         this.repository = repository;
         this.executionReportRepository = executionReportRepository;
+        this.amendmentRepository = amendmentRepository;
     }
 
     public CreateOrderResult create(CreateOrderRequest request) {
@@ -191,6 +196,48 @@ public class OrderService {
     }
 
     @Transactional
+    public AmendOrderResult amend(String orderId, AmendOrderRequest request) {
+        String amendId = normalize(request.amendId(), "amendId", MAX_AMEND_ID_LENGTH, false);
+        long newQuantity = request.quantity();
+        BigDecimal newLimitPrice = request.limitPrice();
+
+        StockOrder order = repository.findByIdForUpdate(orderId)
+                .orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "ORDER_NOT_FOUND", "委托不存在"));
+
+        var existing = amendmentRepository.findByAmendId(amendId);
+        if (existing.isPresent()) {
+            OrderAmendment amendment = existing.get();
+            if (amendment.matches(orderId, newQuantity, newLimitPrice)) {
+                return new AmendOrderResult(amendment, false);
+            }
+            throw new ApiException(HttpStatus.CONFLICT, "AMEND_ID_CONFLICT",
+                    "amendId 已存在且请求字段不一致");
+        }
+
+        if (order.getStatus() != OrderStatus.OPEN && order.getStatus() != OrderStatus.PARTIALLY_FILLED) {
+            throw new ApiException(HttpStatus.CONFLICT, "ORDER_NOT_AMENDABLE",
+                    "只有 OPEN 或 PARTIALLY_FILLED 状态的委托可以改单");
+        }
+        if (newQuantity <= order.getFilledQuantity()) {
+            throw new ApiException(HttpStatus.CONFLICT, "AMEND_QUANTITY_INVALID",
+                    "改单后的总数量必须严格大于已成交数量");
+        }
+
+        OrderAmendment amendment = new OrderAmendment(amendId, order.getId(),
+                order.getQuantity(), newQuantity, order.getLimitPrice(), newLimitPrice,
+                order.getFilledQuantity());
+        order.amend(newQuantity, newLimitPrice);
+        try {
+            amendmentRepository.saveAndFlush(amendment);
+        } catch (DataIntegrityViolationException e) {
+            throw new ApiException(HttpStatus.CONFLICT, "AMEND_ID_CONFLICT",
+                    "amendId 已存在且请求字段不一致");
+        }
+        repository.save(order);
+        return new AmendOrderResult(amendment, true);
+    }
+
+    @Transactional
     public RegisterExecutionResult registerExecution(String orderId, RegisterExecutionRequest request) {
         String executionId = normalize(request.executionId(), "executionId", MAX_EXECUTION_ID_LENGTH, false);
         StockOrder order = repository.findByIdForUpdate(orderId)
@@ -251,5 +298,8 @@ public class OrderService {
     }
 
     public record OrderExecutionsResult(StockOrder order, Page<ExecutionReport> executions) {
+    }
+
+    public record AmendOrderResult(OrderAmendment amendment, boolean created) {
     }
 }

@@ -53,6 +53,14 @@ public class OrderController {
         return OrderResponse.from(orderService.cancel(id));
     }
 
+    @PostMapping("/{id}/amendments")
+    public ResponseEntity<AmendOrderResponse> amend(@PathVariable String id,
+                                                    @Valid @RequestBody AmendOrderRequest request) {
+        OrderService.AmendOrderResult result = orderService.amend(id, request);
+        HttpStatus status = result.created() ? HttpStatus.CREATED : HttpStatus.OK;
+        return ResponseEntity.status(status).body(AmendOrderResponse.from(result.amendment()));
+    }
+
     @PostMapping("/{id}/executions")
     public ResponseEntity<ExecutionResponse> registerExecution(@PathVariable String id,
                                                                @Valid @RequestBody RegisterExecutionRequest request) {
