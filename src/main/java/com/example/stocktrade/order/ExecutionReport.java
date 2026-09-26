@@ -38,6 +38,12 @@ public class ExecutionReport {
     @Column(name = "reversed_at")
     private Instant reversedAt;
 
+    @Column(name = "settled", nullable = false)
+    private boolean settled;
+
+    @Column(name = "settled_at")
+    private Instant settledAt;
+
     protected ExecutionReport() {
     }
 
@@ -49,14 +55,29 @@ public class ExecutionReport {
         this.price = price;
         this.executedAt = Instant.now();
         this.reversed = false;
+        this.settled = false;
     }
 
     public void markReversed(Instant reversedAt) {
         if (this.reversed) {
             throw new IllegalStateException("成交回报已被撤销");
         }
+        if (this.settled) {
+            throw new IllegalStateException("成交回报已结算，不能撤销");
+        }
         this.reversed = true;
         this.reversedAt = reversedAt;
+    }
+
+    public void markSettled(Instant settledAt) {
+        if (this.settled) {
+            throw new IllegalStateException("成交回报已结算");
+        }
+        if (this.reversed) {
+            throw new IllegalStateException("成交回报已被撤销，不能结算");
+        }
+        this.settled = true;
+        this.settledAt = settledAt;
     }
 
     public boolean matches(String orderId, long quantity, BigDecimal price) {
@@ -95,5 +116,13 @@ public class ExecutionReport {
 
     public Instant getReversedAt() {
         return reversedAt;
+    }
+
+    public boolean isSettled() {
+        return settled;
+    }
+
+    public Instant getSettledAt() {
+        return settledAt;
     }
 }

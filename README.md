@@ -42,3 +42,15 @@
   `POST /api/executions/{executionId}/reversals`（请求体含 `reversalId`）两个入口。
   每次成功撤销在同一事务内写入一条审计记录（撤销标识、成交标识、委托标识、成交数量、成交价格、
   撤销时间）。
+- `POST /api/orders/{id}/executions/settlements` 结算确认成交回报，请求体为 `settlementId`、`executionId`；
+  `settlementId` 去除首尾空白后不能为空且全局唯一。只有已登记、未撤销且未结算的成交可以结算；
+  结算与撤销互斥，并发竞争时只有一个成功，失败方返回 409 且不留下状态变更或审计记录。
+  结算只确认该笔成交，不改变所属委托的已成交数量、剩余数量和状态；成交状态与结算审计在同一事务写入。
+  相同 `settlementId` 与相同 `executionId` 重复提交返回首次结算结果（200），不再新增审计；
+  相同 `settlementId` 对应不同成交返回 409（`SETTLEMENT_ID_CONFLICT`）；已结算返回 409
+  （`EXECUTION_ALREADY_SETTLED`），已撤销返回 409（`EXECUTION_ALREADY_REVERSED`），成交不存在返回 404。
+  已结算的成交不能再撤销（撤销返回 409 `EXECUTION_ALREADY_SETTLED`）。
+  同样支持 `POST /api/executions/settlements`（请求体含 `settlementId`、`executionId`）和
+  `POST /api/executions/{executionId}/settlements`（请求体含 `settlementId`）两个入口。
+  每次成功结算写入一条审计记录（结算标识、成交标识、委托标识、成交数量、成交价格、结算时间、
+  委托状态与成交数量快照）；成交明细中带 `settled`、`settledAt`、`settlementId` 可追溯。
