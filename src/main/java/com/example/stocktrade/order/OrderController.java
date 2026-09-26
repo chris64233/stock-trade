@@ -78,11 +78,20 @@ public class OrderController {
         return ResponseEntity.status(status).body(ExecutionReversalResponse.from(result.reversal()));
     }
 
+    @PostMapping("/{id}/executions/settlements")
+    public ResponseEntity<ExecutionSettlementResponse> settleExecution(@PathVariable String id,
+                                                                       @Valid @RequestBody SettleExecutionRequest request) {
+        OrderService.SettleExecutionResult result =
+                orderService.settleExecution(id, request.settlementId(), request.executionId());
+        HttpStatus status = result.created() ? HttpStatus.CREATED : HttpStatus.OK;
+        return ResponseEntity.status(status).body(ExecutionSettlementResponse.from(result.settlement()));
+    }
+
     @GetMapping("/{id}/executions")
     public ExecutionPageResponse listExecutions(@PathVariable String id,
                                                 @RequestParam(required = false) String page,
                                                 @RequestParam(required = false) String size) {
         OrderService.OrderExecutionsResult result = orderService.listExecutions(id, page, size);
-        return ExecutionPageResponse.from(result.order(), result.executions());
+        return ExecutionPageResponse.from(result.order(), result.executions(), result.settlements());
     }
 }

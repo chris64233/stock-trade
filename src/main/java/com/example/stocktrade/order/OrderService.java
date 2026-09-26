@@ -17,6 +17,8 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
+import java.util.stream.Collectors;
 
 @Service
 public class OrderService {
@@ -27,20 +29,24 @@ public class OrderService {
     private static final int MAX_EXECUTION_ID_LENGTH = 64;
     private static final int MAX_AMEND_ID_LENGTH = 64;
     private static final int MAX_REVERSAL_ID_LENGTH = 64;
+    private static final int MAX_SETTLEMENT_ID_LENGTH = 64;
 
     private final StockOrderRepository repository;
     private final ExecutionReportRepository executionReportRepository;
     private final OrderAmendmentRepository amendmentRepository;
     private final ExecutionReversalRepository reversalRepository;
+    private final ExecutionSettlementRepository settlementRepository;
 
     public OrderService(StockOrderRepository repository,
                         ExecutionReportRepository executionReportRepository,
                         OrderAmendmentRepository amendmentRepository,
-                        ExecutionReversalRepository reversalRepository) {
+                        ExecutionReversalRepository reversalRepository,
+                        ExecutionSettlementRepository settlementRepository) {
         this.repository = repository;
         this.executionReportRepository = executionReportRepository;
         this.amendmentRepository = amendmentRepository;
         this.reversalRepository = reversalRepository;
+        this.settlementRepository = settlementRepository;
     }
 
     public CreateOrderResult create(CreateOrderRequest request) {
@@ -127,7 +133,14 @@ public class OrderService {
         Pageable pageable = PageRequest.of(pageNumber, pageSize,
                 Sort.by(Sort.Order.asc("executedAt"), Sort.Order.asc("id")));
         Page<ExecutionReport> executions = executionReportRepository.findByOrderId(orderId, pageable);
-        return new OrderExecutionsResult(order, executions);
+        List<String> executionIds = executions.getContent().stream()
+                .map(ExecutionReport::getExecutionId)
+                .toList();
+        Map<String, ExecutionSettlement> settlements = executionIds.isEmpty()
+                ? Map.of()
+                : settlementRepository.findByExecutionIdIn(executionIds).stream()
+                        .collect(Collectors.toMap(ExecutionSettlement::getExecutionId, s -> s));
+        return new OrderExecutionsResult(order, executions, settlements);
     }
 
     @Transactional(readOnly = true)
@@ -317,6 +330,10 @@ public class OrderService {
                     "reversalId 已存在且对应不同的成交回报");
         }
 
+        if (report.isSettled() || settlementRepository.findByExecutionId(executionId).isPresent()) {
+            throw new ApiException(HttpStatus.CONFLICT, "EXECUTION_ALREADY_SETTLED",
+                    "成交回报已结算，不能撤销");
+        }
         if (report.isReversed() || reversalRepository.findByExecutionId(executionId).isPresent()) {
             throw new ApiException(HttpStatus.CONFLICT, "EXECUTION_ALREADY_REVERSED",
                     "成交回报已被撤销");
@@ -346,6 +363,68 @@ public class OrderService {
                 "成交回报已被撤销");
     }
 
+    @Transactional
+    public SettleExecutionResult settleExecution(String orderId, String rawSettlementId, String rawExecutionId) {
+        String settlementId = normalize(rawSettlementId, "settlementId", MAX_SETTLEMENT_ID_LENGTH, false);
+        String executionId = normalize(rawExecutionId, "executionId", MAX_EXECUTION_ID_LENGTH, false);
+
+        if (orderId != null
+                && repository.findById(orderId).isEmpty()) {
+            throw new ApiException(HttpStatus.NOT_FOUND, "ORDER_NOT_FOUND", "委托不存在");
+        }
+
+        ExecutionReport report = executionReportRepository.findByExecutionId(executionId)
+                .orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "EXECUTION_NOT_FOUND", "成交回报不存在"));
+        if (orderId != null && !report.getOrderId().equals(orderId)) {
+            throw new ApiException(HttpStatus.NOT_FOUND, "EXECUTION_NOT_FOUND", "成交回报不存在");
+        }
+
+        // 与成交撤销共用委托行级锁，保证同一成交的结算与撤销互斥，只有一个能成功
+        StockOrder order = repository.findByIdForUpdate(report.getOrderId())
+                .orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "ORDER_NOT_FOUND", "委托不存在"));
+
+        var existingSettlement = settlementRepository.findBySettlementId(settlementId);
+        if (existingSettlement.isPresent()) {
+            ExecutionSettlement settlement = existingSettlement.get();
+            if (settlement.getExecutionId().equals(executionId)) {
+                return new SettleExecutionResult(settlement, false);
+            }
+            throw new ApiException(HttpStatus.CONFLICT, "SETTLEMENT_ID_CONFLICT",
+                    "settlementId 已存在且对应不同的成交回报");
+        }
+
+        if (report.isReversed() || reversalRepository.findByExecutionId(executionId).isPresent()) {
+            throw new ApiException(HttpStatus.CONFLICT, "EXECUTION_ALREADY_REVERSED",
+                    "成交回报已被撤销，不能结算");
+        }
+        if (report.isSettled() || settlementRepository.findByExecutionId(executionId).isPresent()) {
+            throw new ApiException(HttpStatus.CONFLICT, "EXECUTION_ALREADY_SETTLED",
+                    "成交回报已结算");
+        }
+
+        // 结算只确认成交本身，不改变委托的已成交数量、剩余数量和状态
+        ExecutionSettlement settlement = new ExecutionSettlement(settlementId, report,
+                order.getStatus(), order.getFilledQuantity(), order.getRemainingQuantity());
+        report.markSettled(settlement.getSettledAt());
+        try {
+            settlementRepository.saveAndFlush(settlement);
+        } catch (DataIntegrityViolationException e) {
+            throw translateSettlementConstraintViolation(e);
+        }
+        executionReportRepository.saveAndFlush(report);
+        return new SettleExecutionResult(settlement, true);
+    }
+
+    private ApiException translateSettlementConstraintViolation(DataIntegrityViolationException ex) {
+        String message = String.valueOf(ex.getMostSpecificCause().getMessage());
+        if (message.contains("SETTLEMENT_ID")) {
+            return new ApiException(HttpStatus.CONFLICT, "SETTLEMENT_ID_CONFLICT",
+                    "settlementId 已存在");
+        }
+        return new ApiException(HttpStatus.CONFLICT, "EXECUTION_ALREADY_SETTLED",
+                "成交回报已结算");
+    }
+
     private String normalize(String value, String field, int maxLength, boolean upperCase) {
         if (value == null) {
             throw new ApiException(HttpStatus.BAD_REQUEST, "VALIDATION_ERROR", field + " 不能为空");
@@ -368,12 +447,16 @@ public class OrderService {
     public record RegisterExecutionResult(ExecutionReport report, StockOrder order, boolean created) {
     }
 
-    public record OrderExecutionsResult(StockOrder order, Page<ExecutionReport> executions) {
+    public record OrderExecutionsResult(StockOrder order, Page<ExecutionReport> executions,
+                                        Map<String, ExecutionSettlement> settlements) {
     }
 
     public record AmendOrderResult(OrderAmendment amendment, boolean created) {
     }
 
     public record ReverseExecutionResult(ExecutionReversal reversal, boolean created) {
+    }
+
+    public record SettleExecutionResult(ExecutionSettlement settlement, boolean created) {
     }
 }
