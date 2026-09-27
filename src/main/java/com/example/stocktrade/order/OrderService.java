@@ -15,6 +15,7 @@ import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -30,29 +31,44 @@ public class OrderService {
     private static final int MAX_AMEND_ID_LENGTH = 64;
     private static final int MAX_REVERSAL_ID_LENGTH = 64;
     private static final int MAX_SETTLEMENT_ID_LENGTH = 64;
+    private static final int MAX_REASON_LENGTH = 256;
 
     private final StockOrderRepository repository;
     private final ExecutionReportRepository executionReportRepository;
     private final OrderAmendmentRepository amendmentRepository;
     private final ExecutionReversalRepository reversalRepository;
     private final ExecutionSettlementRepository settlementRepository;
+    private final SettlementReversalRepository settlementReversalRepository;
+    private final SettlementFundMovementRepository fundMovementRepository;
+    private final FundAccountRepository fundAccountRepository;
+    private final FundAccountService fundAccountService;
 
     public OrderService(StockOrderRepository repository,
                         ExecutionReportRepository executionReportRepository,
                         OrderAmendmentRepository amendmentRepository,
                         ExecutionReversalRepository reversalRepository,
-                        ExecutionSettlementRepository settlementRepository) {
+                        ExecutionSettlementRepository settlementRepository,
+                        SettlementReversalRepository settlementReversalRepository,
+                        SettlementFundMovementRepository fundMovementRepository,
+                        FundAccountRepository fundAccountRepository,
+                        FundAccountService fundAccountService) {
         this.repository = repository;
         this.executionReportRepository = executionReportRepository;
         this.amendmentRepository = amendmentRepository;
         this.reversalRepository = reversalRepository;
         this.settlementRepository = settlementRepository;
+        this.settlementReversalRepository = settlementReversalRepository;
+        this.fundMovementRepository = fundMovementRepository;
+        this.fundAccountRepository = fundAccountRepository;
+        this.fundAccountService = fundAccountService;
     }
 
     public CreateOrderResult create(CreateOrderRequest request) {
         String clientOrderId = normalize(request.clientOrderId(), "clientOrderId", MAX_CLIENT_ORDER_ID_LENGTH, false);
         String accountId = normalize(request.accountId(), "accountId", MAX_ACCOUNT_ID_LENGTH, false);
         String symbol = normalize(request.symbol(), "symbol", MAX_SYMBOL_LENGTH, true);
+
+        fundAccountService.ensureExists(accountId);
 
         StockOrder order = new StockOrder(clientOrderId, accountId, symbol,
                 request.side(), request.quantity(), request.limitPrice());
@@ -136,10 +152,13 @@ public class OrderService {
         List<String> executionIds = executions.getContent().stream()
                 .map(ExecutionReport::getExecutionId)
                 .toList();
-        Map<String, ExecutionSettlement> settlementsByExecutionId = settlementRepository
+        // 同一成交可能存在多条结算（原结算、撤销后重新结算），明细只展示当前生效的一条
+        Map<String, ExecutionSettlement> activeSettlementsByExecutionId = settlementRepository
                 .findByExecutionIdIn(executionIds).stream()
-                .collect(Collectors.toMap(ExecutionSettlement::getExecutionId, settlement -> settlement));
-        return new OrderExecutionsResult(order, executions, settlementsByExecutionId);
+                .filter(settlement -> !settlement.isReversed())
+                .collect(Collectors.toMap(ExecutionSettlement::getExecutionId, settlement -> settlement,
+                        (first, second) -> second));
+        return new OrderExecutionsResult(order, executions, activeSettlementsByExecutionId);
     }
 
     @Transactional(readOnly = true)
@@ -329,7 +348,7 @@ public class OrderService {
                     "reversalId 已存在且对应不同的成交回报");
         }
 
-        if (report.isSettled() || settlementRepository.findByExecutionId(executionId).isPresent()) {
+        if (hasActiveSettlement(executionId)) {
             throw new ApiException(HttpStatus.CONFLICT, "EXECUTION_ALREADY_SETTLED",
                     "成交回报已结算，不能撤销");
         }
@@ -369,17 +388,27 @@ public class OrderService {
             throw new ApiException(HttpStatus.NOT_FOUND, "EXECUTION_NOT_FOUND", "成交回报不存在");
         }
 
+        // 先锁委托：与成交撤销、结算撤销、重新结算互斥，并发只能形成一个终态
         StockOrder order = repository.findByIdForUpdate(report.getOrderId())
                 .orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "ORDER_NOT_FOUND", "委托不存在"));
+        FundAccount fundAccount = getOrCreateFundAccountForUpdate(order.getAccountId());
 
         var existingSettlement = settlementRepository.findBySettlementId(settlementId);
         if (existingSettlement.isPresent()) {
             ExecutionSettlement settlement = existingSettlement.get();
-            if (settlement.getExecutionId().equals(executionId)) {
-                return new SettleExecutionResult(settlement, false);
+            if (!settlement.getExecutionId().equals(executionId)) {
+                throw new ApiException(HttpStatus.CONFLICT, "SETTLEMENT_ID_CONFLICT",
+                        "settlementId 已存在且对应不同的成交回报");
             }
-            throw new ApiException(HttpStatus.CONFLICT, "SETTLEMENT_ID_CONFLICT",
-                    "settlementId 已存在且对应不同的成交回报");
+            if (settlement.isReversed()) {
+                throw new ApiException(HttpStatus.CONFLICT, "SETTLEMENT_ALREADY_REVERSED",
+                        "该结算号对应结算已被撤销，请使用新的结算号重新结算");
+            }
+            SettlementFundMovement movement = fundMovementRepository
+                    .findBySettlementIdAndType(settlementId, FundMovementType.SETTLEMENT)
+                    .orElseThrow(() -> new ApiException(HttpStatus.INTERNAL_SERVER_ERROR,
+                            "INTERNAL_ERROR", "结算资金变动缺失"));
+            return new SettleExecutionResult(settlement, movement, false);
         }
 
         if (report.isReversed()) {
@@ -387,22 +416,180 @@ public class OrderService {
                     "成交回报已被撤销，不能结算");
         }
 
-        if (report.isSettled() || settlementRepository.findByExecutionId(executionId).isPresent()) {
+        List<ExecutionSettlement> chain =
+                settlementRepository.findByExecutionIdOrderBySettledAtAscIdAsc(executionId);
+        ExecutionSettlement active = chain.stream()
+                .filter(settlement -> !settlement.isReversed())
+                .findAny()
+                .orElse(null);
+        if (report.isSettled() || active != null) {
             throw new ApiException(HttpStatus.CONFLICT, "EXECUTION_ALREADY_SETTLED",
                     "成交回报已结算");
         }
+        // 重新结算回指链上最后一笔被撤销的结算，原结算 -> 撤销 -> 新结算不可变
+        String replacesSettlementId = chain.isEmpty()
+                ? null
+                : chain.get(chain.size() - 1).getSettlementId();
 
         // 结算只确认成交本身，不改变委托的已成交数量、剩余数量和状态
-        ExecutionSettlement settlement = new ExecutionSettlement(settlementId, report,
-                order.getStatus(), order.getFilledQuantity(), order.getRemainingQuantity());
-        report.markSettled(settlement.getSettledAt());
+        ExecutionSettlement settlement = new ExecutionSettlement(settlementId, report, order.getAccountId(),
+                replacesSettlementId, order.getStatus(), order.getFilledQuantity(),
+                order.getRemainingQuantity());
         try {
             settlementRepository.saveAndFlush(settlement);
         } catch (DataIntegrityViolationException e) {
             throw translateSettlementConstraintViolation(e);
         }
+
+        BigDecimal delta = SettlementFundMovement.signedDelta(report, order.getSide(), false);
+        fundAccount.apply(delta);
+
+        SettlementFundMovement movement;
+        try {
+            movement = fundMovementRepository.saveAndFlush(SettlementFundMovement.settlement(
+                    order.getAccountId(), report, settlementId, delta, fundAccount.getBalance()));
+        } catch (DataIntegrityViolationException e) {
+            throw translateSettlementConstraintViolation(e);
+        }
+
+        report.markSettled(settlement.getSettledAt());
+        fundAccountRepository.save(fundAccount);
         executionReportRepository.saveAndFlush(report);
-        return new SettleExecutionResult(settlement, true);
+        return new SettleExecutionResult(settlement, movement, true);
+    }
+
+    @Transactional
+    public ReverseSettlementResult reverseSettlement(String orderId, String rawReversalId,
+                                                      String rawSettlementId, String rawReason) {
+        String reversalId = normalize(rawReversalId, "reversalId", MAX_REVERSAL_ID_LENGTH, false);
+        String settlementId = normalize(rawSettlementId, "settlementId", MAX_SETTLEMENT_ID_LENGTH, false);
+        String reason = normalize(rawReason, "reason", MAX_REASON_LENGTH, false);
+
+        ExecutionSettlement settlement = settlementRepository.findBySettlementId(settlementId)
+                .orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "SETTLEMENT_NOT_FOUND", "结算不存在"));
+        if (orderId != null && !settlement.getOrderId().equals(orderId)) {
+            throw new ApiException(HttpStatus.NOT_FOUND, "SETTLEMENT_NOT_FOUND", "结算不存在");
+        }
+
+        // 先锁委托：与结算确认/重新结算互斥，每笔结算只能撤销一次
+        StockOrder order = repository.findByIdForUpdate(settlement.getOrderId())
+                .orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "ORDER_NOT_FOUND", "委托不存在"));
+        FundAccount fundAccount = getOrCreateFundAccountForUpdate(order.getAccountId());
+
+        var existingReversal = settlementReversalRepository.findByReversalId(reversalId);
+        if (existingReversal.isPresent()) {
+            SettlementReversal reversal = existingReversal.get();
+            if (reversal.getSettlementId().equals(settlementId)
+                    && reversal.getReason().equals(reason)) {
+                SettlementFundMovement movement = fundMovementRepository
+                        .findBySettlementIdAndType(settlementId, FundMovementType.REVERSAL)
+                        .orElseThrow(() -> new ApiException(HttpStatus.INTERNAL_SERVER_ERROR,
+                                "INTERNAL_ERROR", "撤销资金变动缺失"));
+                return new ReverseSettlementResult(reversal, movement, false);
+            }
+            throw new ApiException(HttpStatus.CONFLICT, "REVERSAL_ID_CONFLICT",
+                    "reversalId 已存在且对应不同的结算或撤销原因");
+        }
+
+        if (settlement.isReversed()) {
+            throw new ApiException(HttpStatus.CONFLICT, "SETTLEMENT_ALREADY_REVERSED",
+                    "结算已被撤销，每笔结算只能撤销一次");
+        }
+
+        ExecutionReport report = executionReportRepository.findByExecutionId(settlement.getExecutionId())
+                .orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "EXECUTION_NOT_FOUND", "成交回报不存在"));
+
+        SettlementReversal reversal = new SettlementReversal(reversalId, settlement, report,
+                order.getAccountId(), reason);
+        try {
+            settlementReversalRepository.saveAndFlush(reversal);
+        } catch (DataIntegrityViolationException e) {
+            throw translateSettlementReversalConstraintViolation(e);
+        }
+
+        BigDecimal delta = SettlementFundMovement.signedDelta(report, order.getSide(), true);
+        fundAccount.apply(delta);
+
+        SettlementFundMovement movement;
+        try {
+            movement = fundMovementRepository.saveAndFlush(SettlementFundMovement.reversal(
+                    order.getAccountId(), report, settlementId, reversalId, delta,
+                    fundAccount.getBalance()));
+        } catch (DataIntegrityViolationException e) {
+            throw translateSettlementReversalConstraintViolation(e);
+        }
+
+        // 追加反向记录恢复结算状态：不删除原结算，也不再改变委托成交数量
+        settlement.markReversed(reversalId, reversal.getReversedAt());
+        report.clearSettlement();
+        settlementRepository.saveAndFlush(settlement);
+        fundAccountRepository.save(fundAccount);
+        executionReportRepository.saveAndFlush(report);
+        return new ReverseSettlementResult(reversal, movement, true);
+    }
+
+    @Transactional(readOnly = true)
+    public FundAccount getFundAccount(String rawAccountId) {
+        String accountId = normalize(rawAccountId, "accountId", MAX_ACCOUNT_ID_LENGTH, false);
+        return fundAccountRepository.findByAccountId(accountId)
+                .orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "ACCOUNT_NOT_FOUND", "资金账户不存在"));
+    }
+
+    @Transactional(readOnly = true)
+    public SettlementChainResult getSettlementChain(String orderId, String rawExecutionId) {
+        String executionId = normalize(rawExecutionId, "executionId", MAX_EXECUTION_ID_LENGTH, false);
+        ExecutionReport report = executionReportRepository.findByExecutionId(executionId)
+                .orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "EXECUTION_NOT_FOUND", "成交回报不存在"));
+        if (orderId != null && !report.getOrderId().equals(orderId)) {
+            throw new ApiException(HttpStatus.NOT_FOUND, "EXECUTION_NOT_FOUND", "成交回报不存在");
+        }
+
+        List<ExecutionSettlement> settlements =
+                settlementRepository.findByExecutionIdOrderBySettledAtAscIdAsc(executionId);
+        List<SettlementReversal> reversals =
+                settlementReversalRepository.findByExecutionIdOrderByReversedAtAscIdAsc(executionId);
+
+        List<SettlementChainNode> nodes = new ArrayList<>();
+        for (ExecutionSettlement settlement : settlements) {
+            SettlementFundMovement movement = fundMovementRepository
+                    .findBySettlementIdAndType(settlement.getSettlementId(), FundMovementType.SETTLEMENT)
+                    .orElse(null);
+            nodes.add(SettlementChainNode.settlement(settlement, movement));
+        }
+        for (SettlementReversal reversal : reversals) {
+            SettlementFundMovement movement = fundMovementRepository
+                    .findBySettlementIdAndType(reversal.getSettlementId(), FundMovementType.REVERSAL)
+                    .orElse(null);
+            nodes.add(SettlementChainNode.reversal(reversal, movement));
+        }
+        nodes.sort(Comparator.comparing(SettlementChainNode::createdAt));
+
+        String currentSettlementId = settlements.stream()
+                .filter(settlement -> !settlement.isReversed())
+                .reduce((first, second) -> second)
+                .map(ExecutionSettlement::getSettlementId)
+                .orElse(null);
+        return new SettlementChainResult(executionId, report.getOrderId(),
+                currentSettlementId != null, currentSettlementId, nodes);
+    }
+
+    /**
+     * 资金账户在创建委托时已初始化；此处先加悲观写锁，极端缺失时再走独立事务补建。
+     * 固定先锁委托后锁账户，避免死锁。
+     */
+    private FundAccount getOrCreateFundAccountForUpdate(String accountId) {
+        return fundAccountRepository.findByAccountIdForUpdate(accountId)
+                .orElseGet(() -> {
+                    fundAccountService.ensureExists(accountId);
+                    return fundAccountRepository.findByAccountIdForUpdate(accountId)
+                            .orElseThrow(() -> new ApiException(HttpStatus.INTERNAL_SERVER_ERROR,
+                                    "INTERNAL_ERROR", "资金账户初始化失败"));
+                });
+    }
+
+    private boolean hasActiveSettlement(String executionId) {
+        return settlementRepository.findByExecutionIdOrderBySettledAtAscIdAsc(executionId).stream()
+                .anyMatch(settlement -> !settlement.isReversed());
     }
 
     private ApiException translateSettlementConstraintViolation(DataIntegrityViolationException ex) {
@@ -413,6 +600,20 @@ public class OrderService {
         }
         return new ApiException(HttpStatus.CONFLICT, "EXECUTION_ALREADY_SETTLED",
                 "成交回报已结算");
+    }
+
+    private ApiException translateSettlementReversalConstraintViolation(DataIntegrityViolationException ex) {
+        String message = String.valueOf(ex.getMostSpecificCause().getMessage());
+        if (message.contains("REVERSAL_ID")) {
+            return new ApiException(HttpStatus.CONFLICT, "REVERSAL_ID_CONFLICT",
+                    "reversalId 已存在");
+        }
+        if (message.contains("SETTLEMENT_ID")) {
+            return new ApiException(HttpStatus.CONFLICT, "SETTLEMENT_ALREADY_REVERSED",
+                    "结算已被撤销，每笔结算只能撤销一次");
+        }
+        return new ApiException(HttpStatus.CONFLICT, "SETTLEMENT_ALREADY_REVERSED",
+                "结算已被撤销");
     }
 
     private ApiException translateReversalConstraintViolation(DataIntegrityViolationException ex) {
@@ -457,6 +658,15 @@ public class OrderService {
     public record ReverseExecutionResult(ExecutionReversal reversal, boolean created) {
     }
 
-    public record SettleExecutionResult(ExecutionSettlement settlement, boolean created) {
+    public record SettleExecutionResult(ExecutionSettlement settlement, SettlementFundMovement movement,
+                                        boolean created) {
+    }
+
+    public record ReverseSettlementResult(SettlementReversal reversal, SettlementFundMovement movement,
+                                          boolean created) {
+    }
+
+    public record SettlementChainResult(String executionId, String orderId, boolean settled,
+                                        String currentSettlementId, List<SettlementChainNode> nodes) {
     }
 }

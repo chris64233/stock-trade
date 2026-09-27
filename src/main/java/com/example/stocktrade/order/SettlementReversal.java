@@ -2,8 +2,6 @@ package com.example.stocktrade.order;
 
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
-import jakarta.persistence.EnumType;
-import jakarta.persistence.Enumerated;
 import jakarta.persistence.Id;
 import jakarta.persistence.Table;
 import jakarta.persistence.UniqueConstraint;
@@ -12,12 +10,18 @@ import java.math.BigDecimal;
 import java.time.Instant;
 import java.util.UUID;
 
+/**
+ * 结算撤销审计记录（追加式，不可修改）。
+ * 不删除原结算，而是通过 {@code settlementId} 指向被撤销的原结算，
+ * 并由重新结算记录通过其 {@code replacesSettlementId} 回指，组成不可变关系链。
+ * reversalId 全局唯一保证幂等；每笔结算至多一条撤销（settlement_id 唯一）。
+ */
 @Entity
-@Table(name = "execution_reversals", uniqueConstraints = {
-        @UniqueConstraint(name = "uk_execution_reversals_reversal_id", columnNames = "reversal_id"),
-        @UniqueConstraint(name = "uk_execution_reversals_execution_id", columnNames = "execution_id")
+@Table(name = "settlement_reversals", uniqueConstraints = {
+        @UniqueConstraint(name = "uk_settlement_reversals_reversal_id", columnNames = "reversal_id"),
+        @UniqueConstraint(name = "uk_settlement_reversals_settlement_id", columnNames = "settlement_id")
 })
-public class ExecutionReversal {
+public class SettlementReversal {
 
     @Id
     @Column(name = "id", nullable = false, updatable = false, length = 36)
@@ -26,11 +30,17 @@ public class ExecutionReversal {
     @Column(name = "reversal_id", nullable = false, updatable = false, length = 64)
     private String reversalId;
 
+    @Column(name = "settlement_id", nullable = false, updatable = false, length = 64)
+    private String settlementId;
+
     @Column(name = "execution_id", nullable = false, updatable = false, length = 64)
     private String executionId;
 
     @Column(name = "order_id", nullable = false, updatable = false, length = 36)
     private String orderId;
+
+    @Column(name = "account_id", nullable = false, updatable = false, length = 64)
+    private String accountId;
 
     @Column(name = "quantity", nullable = false, updatable = false)
     private long quantity;
@@ -38,34 +48,27 @@ public class ExecutionReversal {
     @Column(name = "price", nullable = false, updatable = false, precision = 19, scale = 4)
     private BigDecimal price;
 
+    @Column(name = "reason", nullable = false, updatable = false, length = 256)
+    private String reason;
+
     @Column(name = "reversed_at", columnDefinition = "TIMESTAMP(9)", nullable = false, updatable = false)
     private Instant reversedAt;
 
-    @Enumerated(EnumType.STRING)
-    @Column(name = "order_status_after", nullable = false, updatable = false, length = 16)
-    private OrderStatus orderStatusAfter;
-
-    @Column(name = "filled_quantity_after", nullable = false, updatable = false)
-    private long filledQuantityAfter;
-
-    @Column(name = "remaining_quantity_after", nullable = false, updatable = false)
-    private long remainingQuantityAfter;
-
-    protected ExecutionReversal() {
+    protected SettlementReversal() {
     }
 
-    public ExecutionReversal(String reversalId, ExecutionReport report, OrderStatus orderStatusAfter,
-                             long filledQuantityAfter, long remainingQuantityAfter) {
+    public SettlementReversal(String reversalId, ExecutionSettlement settlement,
+                              ExecutionReport report, String accountId, String reason) {
         this.id = UUID.randomUUID().toString();
         this.reversalId = reversalId;
+        this.settlementId = settlement.getSettlementId();
         this.executionId = report.getExecutionId();
         this.orderId = report.getOrderId();
+        this.accountId = accountId;
         this.quantity = report.getQuantity();
         this.price = report.getPrice();
+        this.reason = reason;
         this.reversedAt = Instant.now();
-        this.orderStatusAfter = orderStatusAfter;
-        this.filledQuantityAfter = filledQuantityAfter;
-        this.remainingQuantityAfter = remainingQuantityAfter;
     }
 
     public String getId() {
@@ -76,12 +79,20 @@ public class ExecutionReversal {
         return reversalId;
     }
 
+    public String getSettlementId() {
+        return settlementId;
+    }
+
     public String getExecutionId() {
         return executionId;
     }
 
     public String getOrderId() {
         return orderId;
+    }
+
+    public String getAccountId() {
+        return accountId;
     }
 
     public long getQuantity() {
@@ -92,19 +103,11 @@ public class ExecutionReversal {
         return price;
     }
 
+    public String getReason() {
+        return reason;
+    }
+
     public Instant getReversedAt() {
         return reversedAt;
-    }
-
-    public OrderStatus getOrderStatusAfter() {
-        return orderStatusAfter;
-    }
-
-    public long getFilledQuantityAfter() {
-        return filledQuantityAfter;
-    }
-
-    public long getRemainingQuantityAfter() {
-        return remainingQuantityAfter;
     }
 }

@@ -49,8 +49,55 @@
   相同 `settlementId` 与相同 `executionId` 重复提交返回首次结算结果（200），不再新增审计；
   相同 `settlementId` 对应不同成交返回 409（`SETTLEMENT_ID_CONFLICT`）；已结算返回 409
   （`EXECUTION_ALREADY_SETTLED`），已撤销返回 409（`EXECUTION_ALREADY_REVERSED`），成交不存在返回 404。
-  已结算的成交不能再撤销（撤销返回 409 `EXECUTION_ALREADY_SETTLED`）。
+  已结算的成交不能直接撤销成交回报（返回 409 `EXECUTION_ALREADY_SETTLED`）；需先按下文
+  「结算撤销与重新结算」撤销结算，成交回报恢复为未结算后才能撤销成交。
   同样支持 `POST /api/executions/settlements`（请求体含 `settlementId`、`executionId`）和
   `POST /api/executions/{executionId}/settlements`（请求体含 `settlementId`）两个入口。
   每次成功结算写入一条审计记录（结算标识、成交标识、委托标识、成交数量、成交价格、结算时间、
   委托状态与成交数量快照）；成交明细中带 `settled`、`settledAt`、`settlementId` 可追溯。
+
+### 资金账户
+
+- `GET /api/fund-accounts/{accountId}` 查询资金账户余额。账户随委托创建自动初始化（初始余额 0），
+  每次结算按成交金额（`price * quantity`）落一笔资金变动：卖出为正向、买入为反向；
+  结算撤销追加反向变动把余额恢复。每笔变动都带符号变动额（`signedDelta`）与变动后余额
+  （`balanceAfter`），资金账户余额与全部变动记录可完整对账。
+
+### 结算撤销与重新结算
+
+**撤销入口**（三选一，均在同一事务内完成资金回退、撤销审计和成交结算状态恢复）：
+
+- `POST /api/executions/settlements/reversals`（全局入口），请求体：
+  `reversalId`、`settlementId`、`reason`
+- `POST /api/executions/settlements/{settlementId}/reversals`（按结算号入口），请求体：
+  `reversalId`、`reason`
+- `POST /api/orders/{id}/executions/{executionId}/settlement-reversal`（按委托+成交入口，
+  撤销该成交当前生效的结算），请求体：`reversalId`、`reason`
+
+规则：
+
+- 撤销是**追加反向记录**：保留原结算审计（置 `reversed=true`、`reversedAt`、`reversalId`），
+  追加一条结算撤销审计和一笔反向资金变动恢复资金状态；不删除原结算，也不再次改变委托的
+  已成交数量、剩余数量和状态；成交回报回到未结算（但不标记为成交撤销）。
+- `reversalId` 全局唯一并保证幂等：相同 `reversalId` 以相同 `settlementId`、相同 `reason`
+  重复提交返回首次撤销结果（200），不新增审计或资金变动；同号对应不同结算或**不同原因**返回
+  409（`REVERSAL_ID_CONFLICT`）。
+- 每笔结算只能撤销一次，换号再次撤销同一结算返回 409（`SETTLEMENT_ALREADY_REVERSED`）；
+  结算不存在返回 404（`SETTLEMENT_NOT_FOUND`）。
+- 结算确认、重新结算与结算撤销共用委托行悲观锁互斥，并发竞争只能形成一个终态；
+  资金账户行随后加悲观写锁串行化余额更新，约束失败时整个事务完整回滚。
+
+**重新结算入口**：撤销成功后，对同一成交使用**新的结算号**再次调用普通结算接口即可：
+
+- `POST /api/orders/{id}/executions/settlements`（请求体含 `settlementId`、`executionId`），或
+- `POST /api/executions/settlements`、`POST /api/executions/{executionId}/settlements`
+
+重新结算写入全新结算审计与资金变动，响应和审计中的 `replacesSettlementId` 回指被撤销的原结算；
+原结算号不能复用（返回 409 `SETTLEMENT_ALREADY_REVERSED`）。撤销—重新结算可以反复进行，
+每次都会在链上追加节点。
+
+**变化链查询**：`GET /api/executions/{executionId}/settlement-chain`
+（或 `GET /api/orders/{id}/executions/{executionId}/settlement-chain`），按时间返回
+`SETTLEMENT` / `REVERSAL` 节点（含各节点的带符号资金变动、变动后余额、撤销原因、
+`replacesSettlementId`），并给出当前是否结算（`settled`）与当前生效结算号
+（`currentSettlementId`）；原结算、撤销、新结算由此组成不可变关系链，可还原整条资金变化。

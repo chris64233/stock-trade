@@ -12,10 +12,16 @@ import java.math.BigDecimal;
 import java.time.Instant;
 import java.util.UUID;
 
+/**
+ * 成交结算审计记录（追加式，不可删除）。
+ * 同一成交可以沿「原结算 -> 结算撤销 -> 新结算」形成链路：
+ * 被撤销的结算保留并置 {@code reversed=true}，重新结算写入新记录并通过
+ * {@code replacesSettlementId} 回指被替换的结算；{@code settlementId} 全局唯一，
+ * 不再对 {@code executionId} 加唯一约束。
+ */
 @Entity
 @Table(name = "execution_settlements", uniqueConstraints = {
-        @UniqueConstraint(name = "uk_execution_settlements_settlement_id", columnNames = "settlement_id"),
-        @UniqueConstraint(name = "uk_execution_settlements_execution_id", columnNames = "execution_id")
+        @UniqueConstraint(name = "uk_execution_settlements_settlement_id", columnNames = "settlement_id")
 })
 public class ExecutionSettlement {
 
@@ -32,14 +38,20 @@ public class ExecutionSettlement {
     @Column(name = "order_id", nullable = false, updatable = false, length = 36)
     private String orderId;
 
+    @Column(name = "account_id", nullable = false, updatable = false, length = 64)
+    private String accountId;
+
     @Column(name = "quantity", nullable = false, updatable = false)
     private long quantity;
 
     @Column(name = "price", nullable = false, updatable = false, precision = 19, scale = 4)
     private BigDecimal price;
 
-    @Column(name = "settled_at", nullable = false, updatable = false)
+    @Column(name = "settled_at", columnDefinition = "TIMESTAMP(9)", nullable = false, updatable = false)
     private Instant settledAt;
+
+    @Column(name = "replaces_settlement_id", updatable = false, length = 64)
+    private String replacesSettlementId;
 
     @Enumerated(EnumType.STRING)
     @Column(name = "order_status_after", nullable = false, updatable = false, length = 16)
@@ -51,21 +63,43 @@ public class ExecutionSettlement {
     @Column(name = "remaining_quantity_after", nullable = false, updatable = false)
     private long remainingQuantityAfter;
 
+    @Column(name = "reversed", nullable = false)
+    private boolean reversed;
+
+    @Column(name = "reversed_at", columnDefinition = "TIMESTAMP(9)")
+    private Instant reversedAt;
+
+    @Column(name = "reversal_id", updatable = false, length = 64)
+    private String reversalId;
+
     protected ExecutionSettlement() {
     }
 
-    public ExecutionSettlement(String settlementId, ExecutionReport report, OrderStatus orderStatusAfter,
+    public ExecutionSettlement(String settlementId, ExecutionReport report, String accountId,
+                               String replacesSettlementId, OrderStatus orderStatusAfter,
                                long filledQuantityAfter, long remainingQuantityAfter) {
         this.id = UUID.randomUUID().toString();
         this.settlementId = settlementId;
         this.executionId = report.getExecutionId();
         this.orderId = report.getOrderId();
+        this.accountId = accountId;
         this.quantity = report.getQuantity();
         this.price = report.getPrice();
         this.settledAt = Instant.now();
+        this.replacesSettlementId = replacesSettlementId;
         this.orderStatusAfter = orderStatusAfter;
         this.filledQuantityAfter = filledQuantityAfter;
         this.remainingQuantityAfter = remainingQuantityAfter;
+        this.reversed = false;
+    }
+
+    public void markReversed(String reversalId, Instant reversedAt) {
+        if (this.reversed) {
+            throw new IllegalStateException("结算已被撤销");
+        }
+        this.reversed = true;
+        this.reversedAt = reversedAt;
+        this.reversalId = reversalId;
     }
 
     public String getId() {
@@ -84,6 +118,10 @@ public class ExecutionSettlement {
         return orderId;
     }
 
+    public String getAccountId() {
+        return accountId;
+    }
+
     public long getQuantity() {
         return quantity;
     }
@@ -96,6 +134,10 @@ public class ExecutionSettlement {
         return settledAt;
     }
 
+    public String getReplacesSettlementId() {
+        return replacesSettlementId;
+    }
+
     public OrderStatus getOrderStatusAfter() {
         return orderStatusAfter;
     }
@@ -106,5 +148,17 @@ public class ExecutionSettlement {
 
     public long getRemainingQuantityAfter() {
         return remainingQuantityAfter;
+    }
+
+    public boolean isReversed() {
+        return reversed;
+    }
+
+    public Instant getReversedAt() {
+        return reversedAt;
+    }
+
+    public String getReversalId() {
+        return reversalId;
     }
 }

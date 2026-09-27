@@ -1,5 +1,6 @@
 package com.example.stocktrade.order;
 
+import com.example.stocktrade.error.ApiException;
 import jakarta.validation.Valid;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
@@ -84,7 +85,47 @@ public class OrderController {
         OrderService.SettleExecutionResult result =
                 orderService.settleExecution(id, request.settlementId(), request.executionId());
         HttpStatus status = result.created() ? HttpStatus.CREATED : HttpStatus.OK;
-        return ResponseEntity.status(status).body(ExecutionSettlementResponse.from(result.settlement()));
+        return ResponseEntity.status(status)
+                .body(ExecutionSettlementResponse.of(result.settlement(), result.movement()));
+    }
+
+    /**
+     * 结算撤销（按委托入口）：请求体含 reversalId、settlementId、reason。
+     */
+    @PostMapping("/{id}/executions/settlements/reversals")
+    public ResponseEntity<SettlementReversalResponse> reverseSettlement(@PathVariable String id,
+                                                                        @Valid @RequestBody ReverseSettlementRequest request) {
+        OrderService.ReverseSettlementResult result = orderService.reverseSettlement(
+                id, request.reversalId(), request.settlementId(), request.reason());
+        HttpStatus status = result.created() ? HttpStatus.CREATED : HttpStatus.OK;
+        return ResponseEntity.status(status)
+                .body(SettlementReversalResponse.of(result.reversal(), result.movement()));
+    }
+
+    /**
+     * 结算撤销（按成交入口）：POST /api/orders/{id}/executions/{executionId}/settlement-reversal
+     * 撤销的是该成交当前生效的结算；撤销后可用新结算号走结算接口重新结算。
+     */
+    @PostMapping("/{id}/executions/{executionId}/settlement-reversal")
+    public ResponseEntity<SettlementReversalResponse> reverseActiveSettlement(@PathVariable String id,
+                                                                              @PathVariable String executionId,
+                                                                              @Valid @RequestBody SettlementReversalRequest request) {
+        String settlementId = orderService.getSettlementChain(id, executionId).currentSettlementId();
+        if (settlementId == null) {
+            throw new ApiException(HttpStatus.CONFLICT, "SETTLEMENT_NOT_FOUND",
+                    "成交当前没有生效的结算，不能撤销");
+        }
+        OrderService.ReverseSettlementResult result = orderService.reverseSettlement(
+                id, request.reversalId(), settlementId, request.reason());
+        HttpStatus status = result.created() ? HttpStatus.CREATED : HttpStatus.OK;
+        return ResponseEntity.status(status)
+                .body(SettlementReversalResponse.of(result.reversal(), result.movement()));
+    }
+
+    @GetMapping("/{id}/executions/{executionId}/settlement-chain")
+    public SettlementChainResponse settlementChain(@PathVariable String id,
+                                                   @PathVariable String executionId) {
+        return SettlementChainResponse.from(orderService.getSettlementChain(id, executionId));
     }
 
     @GetMapping("/{id}/executions")

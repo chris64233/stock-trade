@@ -45,10 +45,10 @@ public class StockOrder {
     @Column(name = "filled_quantity", nullable = false)
     private long filledQuantity;
 
-    @Column(name = "created_at", nullable = false, updatable = false)
+    @Column(name = "created_at", columnDefinition = "TIMESTAMP(9)", nullable = false, updatable = false)
     private Instant createdAt;
 
-    @Column(name = "cancelled_at")
+    @Column(name = "cancelled_at", columnDefinition = "TIMESTAMP(9)")
     private Instant cancelledAt;
 
     protected StockOrder() {

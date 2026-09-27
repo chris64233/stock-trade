@@ -29,19 +29,19 @@ public class ExecutionReport {
     @Column(name = "price", nullable = false, updatable = false, precision = 19, scale = 4)
     private BigDecimal price;
 
-    @Column(name = "executed_at", nullable = false, updatable = false)
+    @Column(name = "executed_at", columnDefinition = "TIMESTAMP(9)", nullable = false, updatable = false)
     private Instant executedAt;
 
     @Column(name = "reversed", nullable = false)
     private boolean reversed;
 
-    @Column(name = "reversed_at")
+    @Column(name = "reversed_at", columnDefinition = "TIMESTAMP(9)")
     private Instant reversedAt;
 
     @Column(name = "settled", nullable = false)
     private boolean settled;
 
-    @Column(name = "settled_at")
+    @Column(name = "settled_at", columnDefinition = "TIMESTAMP(9)")
     private Instant settledAt;
 
     protected ExecutionReport() {
@@ -78,6 +78,18 @@ public class ExecutionReport {
         }
         this.settled = true;
         this.settledAt = settledAt;
+    }
+
+    /**
+     * 结算撤销：只清结算状态（恢复为未结算，允许用新结算号重新结算），
+     * 不改变成交撤销标志和委托成交数量。
+     */
+    public void clearSettlement() {
+        if (!this.settled) {
+            throw new IllegalStateException("成交回报未结算，不能撤销结算");
+        }
+        this.settled = false;
+        this.settledAt = null;
     }
 
     public boolean matches(String orderId, long quantity, BigDecimal price) {
