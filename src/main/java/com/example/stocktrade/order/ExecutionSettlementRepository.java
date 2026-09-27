@@ -10,7 +10,7 @@ public interface ExecutionSettlementRepository extends JpaRepository<ExecutionSe
 
     Optional<ExecutionSettlement> findBySettlementId(String settlementId);
 
-    Optional<ExecutionSettlement> findByExecutionId(String executionId);
+    List<ExecutionSettlement> findByExecutionIdOrderBySettledAtAscIdAsc(String executionId);
 
     List<ExecutionSettlement> findByExecutionIdIn(Collection<String> executionIds);
 }

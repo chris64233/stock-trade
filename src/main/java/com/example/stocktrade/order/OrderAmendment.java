@@ -38,7 +38,7 @@ public class OrderAmendment {
     @Column(name = "filled_quantity", nullable = false, updatable = false)
     private long filledQuantity;
 
-    @Column(name = "amended_at", nullable = false, updatable = false)
+    @Column(name = "amended_at", columnDefinition = "TIMESTAMP(9)", nullable = false, updatable = false)
     private Instant amendedAt;
 
     protected OrderAmendment() {
